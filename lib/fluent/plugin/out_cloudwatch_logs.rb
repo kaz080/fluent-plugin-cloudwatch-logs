@@ -72,6 +72,12 @@ module Fluent
             message = record.to_json
           end
 
+          # The message should not be empty in CloudWatchLogs.
+          # (otherwise respond validation errors as InvalidParameterException)
+          if message.empty?
+            message = ' '
+          end
+
           message.force_encoding('ASCII-8BIT')
 
           if @max_message_length
@@ -124,8 +130,24 @@ module Fluent
       token = next_sequence_token(group_name, @log_stream_name)
       args[:sequence_token] = token if token
 
-      response = @logs.put_log_events(args)
-      store_next_sequence_token(group_name, @log_stream_name, response.next_sequence_token)
+      begin
+        begin
+          response = @logs.put_log_events(args)
+        rescue Aws::CloudWatchLogs::Errors::InvalidSequenceTokenException => e
+          # Retry once with expected sequenceToken
+          e.message =~ /expected sequenceToken is: (\w+)/
+          sequence_token = $1
+          raise unless sequence_token
+          log.debug "Retry with expected sequenceToken: #{sequence_token}"
+          args[:sequence_token] = sequence_token
+          response = @logs.put_log_events(args)
+        end
+        store_next_sequence_token(group_name, @log_stream_name, response.next_sequence_token)
+      rescue Aws::CloudWatchLogs::Errors::InvalidParameterException => e
+        # Don't raise the exception, otherwise try_flush retries
+        # until retry count exceededs limit, and throw away old logs.
+        log.warn e.message
+      end
     end
 
     def create_log_group(group_name)
