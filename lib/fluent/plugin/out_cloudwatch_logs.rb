@@ -124,7 +124,24 @@ module Fluent
       token = next_sequence_token(group_name, @log_stream_name)
       args[:sequence_token] = token if token
 
-      response = @logs.put_log_events(args)
+      begin
+        begin
+          response = @logs.put_log_events(args)
+        rescue Aws::CloudWatchLogs::Errors::InvalidSequenceTokenException => e
+          e.message =~ /expected sequenceToken is: (\w+)/
+          sequence_token = $1
+          raise unless sequence_token
+          log.warn "Retry with expected sequenceToken: #{sequence_token}"
+          args[:sequence_token] = sequence_token
+          # retry only once
+          response = @logs.put_log_events(args)
+        end
+      rescue Aws::CloudWatchLogs::Errors::InvalidParameterException => e
+        # e.message =~ /^\d+ validation errors detected:/
+        # Discard validation errors (the others has been sent?)
+        log.warn e.message
+      end
+
       store_next_sequence_token(group_name, @log_stream_name, response.next_sequence_token)
     end
 
